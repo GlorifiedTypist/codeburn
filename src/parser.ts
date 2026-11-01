@@ -3021,7 +3021,7 @@ function cachedCallToApiCall(call: CachedCall): ParsedApiCall {
     pricingModel, u.inputTokens, outputForCost,
     u.cacheCreationInputTokens, u.cacheReadInputTokens,
     u.webSearchRequests, call.speed, u.cacheCreationOneHourTokens, call.provider,
-  ) * deepSeekUsdBillFactor(call.provider, pricingModel, call.timestamp)
+  ) * deepSeekUsdBillFactor(call.provider, pricingModel, call.timestamp, call.route)
   return applyLocalModelSavings({
     provider: call.provider,
     model: call.model,
