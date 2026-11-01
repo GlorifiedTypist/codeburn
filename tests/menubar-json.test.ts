@@ -677,7 +677,7 @@ describe('buildDeepSeekSchedule', () => {
     expect(peak.nextChangeAt).toBe('2026-09-28T04:00:00.000Z')
     expect(peak.holiday).toBe(false)
     expect(peak.missingTimestamp).toBe('peak')
-    expect(peak.appliesToProviders).toEqual(['dsh', 'claude'])
+    expect(peak.appliesToProviders).toEqual(['DeepSeek API models'])
     expect(peak.offPeakFactor).toBe(0.5)
     expect(peak.peakWindowsUtc).toEqual([
       { start: '01:00', end: '04:00' },

@@ -311,9 +311,10 @@ export type DeepSeekSchedule = {
   offPeakFactor: number
   /// A usage record with no usable timestamp is billed at the peak list rate.
   missingTimestamp: 'peak'
-  /// Providers whose token-priced DeepSeek calls use this schedule. Other
-  /// providers keep their own uniform price.
-  appliesToProviders: Array<'dsh' | 'claude'>
+  /// Who the off-peak factor applies to. The schedule follows a DeepSeek API
+  /// model id, whichever coding tool logged the call. Gateway prices are not
+  /// in this list. The menubar plugin prints these strings in a footnote.
+  appliesToProviders: string[]
   models: DeepSeekModelRates[]
   /// Retired names priced as `models[].id` only when the pricing catalog has
   /// no row of their own. A catalog row still wins.
@@ -354,7 +355,7 @@ export function buildDeepSeekSchedule(now: Date): DeepSeekSchedule {
     holiday: isChinesePublicHolidayUtc(now),
     offPeakFactor: DEEPSEEK_OFF_PEAK_FACTOR,
     missingTimestamp: 'peak',
-    appliesToProviders: ['dsh', 'claude'],
+    appliesToProviders: ['DeepSeek API models'],
     models: [
       deepSeekModelRates('deepseek-v4-pro', DEEPSEEK_PRO_RATE_IDS),
       deepSeekModelRates('deepseek-flash', DEEPSEEK_FLASH_RATE_IDS),

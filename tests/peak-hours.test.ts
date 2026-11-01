@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
+import { calculateCost } from '../src/models.js'
 import {
   classifyPeak,
   deepSeekHolidayCoverageYears,
@@ -132,6 +133,11 @@ describe('nextDeepSeekPhaseChange', () => {
 })
 
 describe('deepSeekUsdBillFactor', () => {
+  // Sunday 2026-11-01 is off-peak all day. Monday 2026-11-02 02:30 UTC is inside
+  // the 01:00-04:00 peak window. Thursday 2026-10-01 is National Day.
+  const sunday = '2026-11-01T15:00:00Z'
+  const mondayPeak = '2026-11-02T02:30:00Z'
+
   it('is half off-peak and full at peak for first-party and Claude-compatible DeepSeek calls', () => {
     expect(deepSeekUsdBillFactor('dsh', 'deepseek-v4-pro', '2026-09-28T02:00:00Z')).toBe(1)
     expect(deepSeekUsdBillFactor('dsh', 'deepseek-v4-pro', '2026-09-28T12:00:00Z')).toBe(0.5)
@@ -140,19 +146,56 @@ describe('deepSeekUsdBillFactor', () => {
     expect(deepSeekUsdBillFactor('dsh', 'deepseek-chat', '2026-09-26T02:00:00Z')).toBe(0.5)
   })
 
+  it('prices a DeepSeek model from any coding tool by the call timestamp', () => {
+    for (const provider of ['opencode', 'pi', 'hermes', 'dsh', 'claude']) {
+      expect(deepSeekUsdBillFactor(provider, 'deepseek/deepseek-v4-pro', sunday)).toBe(0.5)
+      expect(deepSeekUsdBillFactor(provider, 'deepseek-v4-pro', mondayPeak)).toBe(1)
+      expect(deepSeekUsdBillFactor(provider, 'deepseek-v4-flash', sunday)).toBe(0.5)
+      expect(deepSeekUsdBillFactor(provider, 'deepseek/deepseek-flash', '2026-10-01T08:00:00Z')).toBe(0.5)
+    }
+  })
+
   it('stays at the peak list rate without a usable timestamp', () => {
     expect(deepSeekUsdBillFactor('dsh', 'deepseek-v4-pro', undefined)).toBe(1)
     expect(deepSeekUsdBillFactor('dsh', 'deepseek-v4-pro', '')).toBe(1)
     expect(deepSeekUsdBillFactor('dsh', 'deepseek-v4-pro', 'not-a-date')).toBe(1)
     expect(deepSeekUsdBillFactor('claude', 'deepseek-flash', undefined)).toBe(1)
+    expect(deepSeekUsdBillFactor('opencode', 'deepseek/deepseek-v4-pro', undefined)).toBe(1)
+    expect(deepSeekUsdBillFactor('opencode', 'deepseek-v4-pro', '')).toBe(1)
+    expect(deepSeekUsdBillFactor('opencode', 'deepseek-v4-flash', 'not-a-date')).toBe(1)
   })
 
-  it('does not discount gateways, other providers, or non-DeepSeek models', () => {
+  it('does not discount gateways or non-DeepSeek models', () => {
     expect(deepSeekUsdBillFactor('openrouter', 'deepseek/deepseek-v4-pro', '2026-09-28T12:00:00Z')).toBe(1)
     expect(deepSeekUsdBillFactor('zerostack', 'deepseek/deepseek-v4-pro', '2026-09-28T12:00:00Z')).toBe(1)
+    expect(deepSeekUsdBillFactor('vercel-gateway', 'deepseek-v4-pro', sunday)).toBe(1)
+    expect(deepSeekUsdBillFactor('opencode', 'openrouter/deepseek/deepseek-v4-pro', sunday)).toBe(1)
+    expect(deepSeekUsdBillFactor('opencode', 'deepseek-v4-pro', sunday, 'openrouter')).toBe(1)
+    expect(deepSeekUsdBillFactor('opencode', 'deepseek-v4-pro', sunday, 'bedrock')).toBe(1)
     expect(deepSeekUsdBillFactor('claude', 'claude-sonnet-4-6', '2026-09-28T12:00:00Z')).toBe(1)
+    expect(deepSeekUsdBillFactor('opencode', 'claude-sonnet-4-6', sunday)).toBe(1)
     expect(deepSeekUsdBillFactor('zcode', 'glm-5.3', '2026-09-21T12:00:00Z')).toBe(1)
     expect(deepSeekUsdBillFactor('dsh', 'glm-5.3', '2026-09-28T12:00:00Z')).toBe(1)
+  })
+
+  it('bills an off-peak DeepSeek call at half the peak list cost', () => {
+    const model = 'deepseek/deepseek-v4-pro'
+    const list = calculateCost(model, 1_000_000, 250_000, 0, 4_000_000, 0)
+    expect(list).toBeGreaterThan(0)
+    const bill = (provider: string, id: string, timestamp?: string, route?: string) =>
+      calculateCost(id, 1_000_000, 250_000, 0, 4_000_000, 0) * deepSeekUsdBillFactor(provider, id, timestamp, route)
+
+    expect(bill('opencode', model, mondayPeak)).toBeCloseTo(list, 12)
+    expect(bill('opencode', model, sunday)).toBeCloseTo(list * 0.5, 12)
+    expect(bill('opencode', 'deepseek-v4-pro', undefined)).toBeCloseTo(
+      calculateCost('deepseek-v4-pro', 1_000_000, 250_000, 0, 4_000_000, 0),
+      12,
+    )
+
+    const sonnet = calculateCost('claude-sonnet-4-6', 1_000_000, 250_000, 0, 4_000_000, 0)
+    expect(bill('opencode', 'claude-sonnet-4-6', sunday)).toBeCloseTo(sonnet, 12)
+    expect(bill('claude', 'claude-sonnet-4-6', sunday)).toBeCloseTo(sonnet, 12)
+    expect(bill('openrouter', model, sunday)).toBeCloseTo(list, 12)
   })
 })
 

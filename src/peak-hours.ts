@@ -14,23 +14,25 @@
 // Design: this module classifies a call's timestamp into peak/off-peak/unknown
 // and, for DeepSeek USD bills, exposes the multiplier the pricer applies.
 // deepSeekUsdBillFactor is 0.5 off-peak and 1 at peak. It is 1 when the
-// timestamp is missing or the route is not billed on DeepSeek's schedule, so
-// a gateway's uniform price and a reported cost are never discounted here.
-// The models report still splits stored costUSD by window; for DeepSeek that
-// stored cost is already the time-of-day bill, and the legs still add back
-// up to the Cost column.
+// timestamp is missing or unparseable: off-peak is a discount, applied only
+// when the call's own timestamp proves the window.
+// The multiplier follows the model DeepSeek billed, not the coding tool that
+// logged the call. OpenCode, Claude-compatible transcripts, dsh, and any
+// other wrapper use this schedule for a DeepSeek API model id (bare, or
+// `deepseek/…`). A gateway keeps its own uniform price: OpenRouter,
+// zerostack, vercel-gateway, a Bedrock/Vertex/OpenRouter route, or any model
+// id whose first namespace is not `deepseek`.
+// The models report still splits stored costUSD by window for the first-party
+// set below. For DeepSeek that stored cost is already the time-of-day bill,
+// and the legs still add back up to the Cost column.
 //
-// Classification is restricted to first-party routes: the vendor's discount
-// only exists where the vendor bills directly. The same model reached through
-// a gateway (OpenRouter, vercel-gateway, Bedrock routes, ...) pays the
-// gateway's uniform price, and providers in REPORTED_COST_PROVIDERS (or calls
-// with `costFromBilling`) may already carry the discount in their reported
-// cost. The first-party set below must therefore stay disjoint from
-// REPORTED_COST_PROVIDERS; a provider joining that set can never appear here.
+// That split set must stay disjoint from REPORTED_COST_PROVIDERS: those
+// providers (or calls with `costFromBilling`) may already carry a discount in
+// a reported cost. A provider joining that set can never appear there.
 
 import { CHINESE_PUBLIC_HOLIDAYS as CHINESE_PUBLIC_HOLIDAY_DATES } from './data/chinese-public-holidays.js'
 import { DEEPSEEK_OFF_PEAK_FACTOR } from './deepseek-rates.js'
-import { resolveCanonicalModelId } from './models.js'
+import { registeredRouteIds, resolveCanonicalModelId } from './models.js'
 
 /// How a route's vendor treats peak-hour usage.
 export type PeakBillingKind =
@@ -198,27 +200,54 @@ export function classifyPeak(provider: string, model: string, timestamp: string 
   return peak ? 'peak' : 'off-peak'
 }
 
-/// Providers whose token-priced DeepSeek calls use DeepSeek's own peak
-/// schedule. `dsh` is the DeepSeek API client. `claude` covers Claude-compatible
-/// transcripts whose model id is a DeepSeek API model and which are priced from
-/// DeepSeek's table (see the v4 Claude pricing regression). Gateways
-/// (openrouter, zerostack, vercel, ...) stay at their uniform price.
-const DEEPSEEK_SCHEDULE_PROVIDERS: ReadonlySet<string> = new Set(['dsh', 'claude'])
+/// Providers that price a DeepSeek model on their own card. The same model id
+/// logged by a coding tool is DeepSeek's bill; these are not.
+const DEEPSEEK_UNIFORM_PRICE_PROVIDERS: ReadonlySet<string> = new Set([
+  'openrouter',
+  'zerostack',
+  'vercel-gateway',
+])
 
-function billsDeepSeekSchedule(provider: string, model: string): boolean {
-  if (!DEEPSEEK_SCHEDULE_PROVIDERS.has(provider)) return false
-  // Reuse the first-party model gate with the provider forced to dsh, so a
-  // Claude transcript and a DSH session accept the same model ids.
-  return peakBillingKind('dsh', model) === 'deepseek-usd'
+let gatewayRouteIds: ReadonlySet<string> | null = null
+
+function isGatewayRoute(route: string | null | undefined): boolean {
+  if (!route) return false
+  if (!gatewayRouteIds) gatewayRouteIds = new Set(registeredRouteIds())
+  return gatewayRouteIds.has(route)
+}
+
+/// A DeepSeek API model: a bare id (`deepseek-v4-pro`) or the maker prefix
+/// (`deepseek/deepseek-v4-pro`). Any other first namespace is a gateway or
+/// reseller path and keeps that vendor's price. The leaf check is the same
+/// one dsh uses, so Claude transcripts and OpenCode rows accept one set of ids.
+function isDeepSeekApiModel(model: string): boolean {
+  if (!model || typeof model !== 'string') return false
+  const lower = model.trim().toLowerCase()
+  const slash = lower.indexOf('/')
+  if (slash !== -1 && lower.slice(0, slash) !== 'deepseek') return false
+  return peakBillingKind('dsh', lower) === 'deepseek-usd'
+}
+
+function billsDeepSeekSchedule(provider: string, model: string, route?: string | null): boolean {
+  if (DEEPSEEK_UNIFORM_PRICE_PROVIDERS.has(provider)) return false
+  if (isGatewayRoute(route)) return false
+  return isDeepSeekApiModel(model)
 }
 
 /// Scale a peak-list cost to the rate in force at `timestamp`.
 /// 1 at peak, DEEPSEEK_OFF_PEAK_FACTOR off-peak.
 /// Missing or unparseable timestamps stay at 1 (the peak list rate): off-peak
 /// is a discount, applied only when the call's own timestamp proves the window.
-/// Routes that are not on DeepSeek's schedule also stay at 1.
-export function deepSeekUsdBillFactor(provider: string, model: string, timestamp: string | undefined): number {
-  if (!billsDeepSeekSchedule(provider, model)) return 1
+/// A gateway provider, a gateway route, or a non-DeepSeek model also stays at 1.
+/// `route` is the billing door recorded beside the tool (OpenCode's providerID
+/// when it is OpenRouter, Bedrock, or Vertex). The tool name itself is not a gate.
+export function deepSeekUsdBillFactor(
+  provider: string,
+  model: string,
+  timestamp: string | undefined,
+  route?: string | null,
+): number {
+  if (!billsDeepSeekSchedule(provider, model, route)) return 1
   const instant = parseInstant(timestamp)
   if (!instant) return 1
   return isDeepSeekPeak(instant) ? 1 : DEEPSEEK_OFF_PEAK_FACTOR
