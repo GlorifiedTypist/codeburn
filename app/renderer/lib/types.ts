@@ -181,6 +181,26 @@ export type CursorSyncStatus = {
 
 export type MenubarPayload = {
   generated: string
+  /** DeepSeek peak schedule (src/menubar-json.ts DeepSeekSchedule). Add-only. */
+  deepseek?: {
+    phase: 'peak' | 'off-peak'
+    nextChangeAt: string
+    timezone: 'UTC'
+    peakDaysUtc: 'Mon-Fri'
+    peakWindowsUtc: Array<{ start: string; end: string }>
+    holiday: boolean
+    offPeakFactor: number
+    missingTimestamp: 'peak'
+    appliesToProviders: string[]
+    models: Array<{
+      id: string
+      label: string
+      alsoBilledAs: string[]
+      peak: { inputCacheHitPerMillion: number; inputCacheMissPerMillion: number; outputPerMillion: number }
+      offPeak: { inputCacheHitPerMillion: number; inputCacheMissPerMillion: number; outputPerMillion: number }
+    }>
+    unlistedFallback: Record<string, string>
+  }
   /** Consecutive active days across every provider, independent of the selected
    *  period and provider filter. Omitted by CLIs that predate the field. */
   streak?: number

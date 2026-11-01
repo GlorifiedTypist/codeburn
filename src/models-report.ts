@@ -49,19 +49,20 @@ export type ModelReportRow = {
   /// True when `credits` is a partial sum because some contributing buckets
   /// had no known credit rate.
   creditsIncomplete?: boolean
-  /// Peak-hours split (#peak-hours): consumption shares of the stored
-  /// `costUSD` (list rate), never a repricing — `peakUSD + offPeakUSD ==
-  /// costUSD` for every split row, because the vendor's own bill applies the
-  /// off-peak discount. Null on rows whose route has no first-party peak
-  /// regime (see peak-hours.ts) or whose calls all landed in `unknown`
-  /// (missing/invalid timestamps) — never guessed.
+  /// Peak-hours split (#peak-hours): shares of the stored `costUSD`.
+  /// `peakUSD + offPeakUSD == costUSD` for every split row. DeepSeek's
+  /// `costUSD` is already the time-of-day bill (off-peak calls stored at half
+  /// the peak list rate). Z.ai `costUSD` stays the list USD rate; its 0.5x
+  /// discount is plan credits, not dollars. Null on rows whose route has no
+  /// first-party peak regime (see peak-hours.ts) or whose calls all landed in
+  /// `unknown` (missing/invalid timestamps) — never guessed.
   peakUSD?: number | null
   offPeakUSD?: number | null
   peakCalls?: number | null
   offPeakCalls?: number | null
-  /// Which vendor's windows the split ran under: 'deepseek-usd' (0.5x off-peak
-  /// on the DeepSeek API bill) or 'zai-credits' (0.5x off-peak in Z.ai plan
-  /// credits). Absent with the split.
+  /// Which vendor's windows the split ran under: 'deepseek-usd' (costUSD is
+  /// already the time-of-day DeepSeek bill) or 'zai-credits' (0.5x off-peak in
+  /// Z.ai plan credits; USD list rate unchanged). Absent with the split.
   peakKind?: 'deepseek-usd' | 'zai-credits'
   topCategory?: TaskCategory
   topCategoryCost?: number
@@ -103,9 +104,9 @@ type Bucket = {
   savingsBaselineModel: string
   calls: number
   /// Peak-hours split (#peak-hours): additive per-window cost/calls resolved
-  /// from each call's own timestamp, at the stored list rate. peakCostUSD +
-  /// offPeakCostUSD == costUSD for classified calls — a consumption share,
-  /// never a repricing (the vendor's bill applies the off-peak discount).
+  /// from each call's own timestamp. peakCostUSD + offPeakCostUSD == costUSD
+  /// for classified calls. The split does not reprice: DeepSeek's time-of-day
+  /// rate is already in costUSD, and Z.ai's credit discount is not a USD change.
   peakKind: 'deepseek-usd' | 'zai-credits' | null
   peakCostUSD: number
   offPeakCostUSD: number
@@ -271,9 +272,8 @@ export async function aggregateModels(projects: ProjectSummary[], opts: Aggregat
           // Peak-hours split (#peak-hours): classify from the call's own
           // timestamp, never guessed — unknown when the route has no
           // first-party peak regime or the timestamp is missing/invalid.
-          // Both legs carry the stored list-rate cost, so the split is a
-          // consumption share that adds back up to costUSD; the vendor's
-          // bill, not this report, applies the off-peak discount.
+          // Both legs carry the stored costUSD, so the split adds back up to
+          // it. DeepSeek's off-peak discount is already inside that cost.
           if (bucket.peakKind) {
             const peak = classifyPeak(provider, model, call.timestamp)
             if (peak === 'peak') {
@@ -455,9 +455,8 @@ export async function aggregateModels(projects: ProjectSummary[], opts: Aggregat
   return filtered
 }
 
-/// One-line "peak X / off-peak Y" cell (#peak-hours): list-rate consumption
-/// shares that add back up to the row's cost. '-' when the row carries no
-/// split.
+/// One-line "peak X / off-peak Y" cell (#peak-hours): per-window shares of
+/// costUSD. '-' when the row carries no split.
 export function formatPeakSplit(row: Pick<ModelReportRow, 'peakUSD' | 'offPeakUSD' | 'peakKind'>): string {
   if (row.peakUSD == null && row.offPeakUSD == null) return '-'
   return `${formatCost(row.peakUSD ?? 0)} / ${formatCost(row.offPeakUSD ?? 0)}`

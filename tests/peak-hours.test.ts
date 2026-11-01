@@ -3,8 +3,11 @@ import { describe, expect, it } from 'vitest'
 import {
   classifyPeak,
   deepSeekHolidayCoverageYears,
+  deepSeekPhase,
+  deepSeekUsdBillFactor,
   isDeepSeekPeak,
   isZaiPeak,
+  nextDeepSeekPhaseChange,
   peakBillingKind,
 } from '../src/peak-hours.js'
 
@@ -73,14 +76,83 @@ describe('isZaiPeak', () => {
 })
 
 describe('deepSeekHolidayCoverageYears', () => {
-  it('covers the current year', () => {
-    // Fails the moment the calendar goes stale: a new year needs its verified
-    // holiday dates added (never projected ahead).
-    expect(deepSeekHolidayCoverageYears().has(new Date().getUTCFullYear())).toBe(true)
+  it('covers the current year and the next', () => {
+    // Fails when the calendar goes stale: the current year and the following
+    // year need sourced dates in src/data/chinese-public-holidays.ts.
+    const year = new Date().getUTCFullYear()
+    expect(deepSeekHolidayCoverageYears().has(year)).toBe(true)
+    expect(deepSeekHolidayCoverageYears().has(year + 1)).toBe(true)
   })
 
-  it('does not project future years', () => {
-    expect(deepSeekHolidayCoverageYears().has(2027)).toBe(false)
+  it('does not invent a year past the sourced calendar', () => {
+    expect(deepSeekHolidayCoverageYears().has(new Date().getUTCFullYear() + 2)).toBe(false)
+  })
+})
+
+describe('2027 statutory holidays', () => {
+  it('treats a statutory weekday as off-peak and the next weekday as peak', () => {
+    // Qingming 2027-04-05 is a Monday. Dragon Boat 2027-06-09 is a Wednesday.
+    // The day after each is not on the statutory list (调休 extensions are
+    // unpublished), so it is a normal peak morning.
+    expect(isDeepSeekPeak(at('2027-04-05T02:00:00Z'))).toBe(false)
+    expect(isDeepSeekPeak(at('2027-04-06T02:00:00Z'))).toBe(true)
+    expect(isDeepSeekPeak(at('2027-06-09T08:00:00Z'))).toBe(false)
+    expect(isDeepSeekPeak(at('2027-06-10T08:00:00Z'))).toBe(true)
+    // National Day statutory span ends 2027-10-03; Monday 10-04 is not yet
+    // a sourced holiday.
+    expect(isDeepSeekPeak(at('2027-10-01T08:00:00Z'))).toBe(false)
+    expect(isDeepSeekPeak(at('2027-10-04T08:00:00Z'))).toBe(true)
+  })
+})
+
+describe('nextDeepSeekPhaseChange', () => {
+  it('walks the weekday window edges', () => {
+    // Monday 2026-09-28.
+    expect(nextDeepSeekPhaseChange(at('2026-09-28T00:59:59Z')).toISOString()).toBe('2026-09-28T01:00:00.000Z')
+    expect(nextDeepSeekPhaseChange(at('2026-09-28T01:00:00Z')).toISOString()).toBe('2026-09-28T04:00:00.000Z')
+    expect(nextDeepSeekPhaseChange(at('2026-09-28T03:59:59Z')).toISOString()).toBe('2026-09-28T04:00:00.000Z')
+    expect(nextDeepSeekPhaseChange(at('2026-09-28T04:00:00Z')).toISOString()).toBe('2026-09-28T06:00:00.000Z')
+    expect(nextDeepSeekPhaseChange(at('2026-09-28T06:00:00Z')).toISOString()).toBe('2026-09-28T10:00:00.000Z')
+    expect(nextDeepSeekPhaseChange(at('2026-09-28T10:00:00Z')).toISOString()).toBe('2026-09-29T01:00:00.000Z')
+  })
+
+  it('skips the weekend', () => {
+    expect(nextDeepSeekPhaseChange(at('2026-09-25T12:00:00Z')).toISOString()).toBe('2026-09-28T01:00:00.000Z')
+    expect(deepSeekPhase(at('2026-09-26T02:00:00Z'))).toBe('off-peak')
+    expect(nextDeepSeekPhaseChange(at('2026-09-26T02:00:00Z')).toISOString()).toBe('2026-09-28T01:00:00.000Z')
+  })
+
+  it('skips a holiday that covers the next window, including a long National Day', () => {
+    // Friday 2026-09-25 is Mid-Autumn, so the morning peak never starts.
+    expect(deepSeekPhase(at('2026-09-25T02:00:00Z'))).toBe('off-peak')
+    expect(nextDeepSeekPhaseChange(at('2026-09-25T02:00:00Z')).toISOString()).toBe('2026-09-28T01:00:00.000Z')
+    // National Day 2026-10-01..10-07. The next peak morning is Thursday 10-08.
+    expect(nextDeepSeekPhaseChange(at('2026-10-01T08:00:00Z')).toISOString()).toBe('2026-10-08T01:00:00.000Z')
+  })
+})
+
+describe('deepSeekUsdBillFactor', () => {
+  it('is half off-peak and full at peak for first-party and Claude-compatible DeepSeek calls', () => {
+    expect(deepSeekUsdBillFactor('dsh', 'deepseek-v4-pro', '2026-09-28T02:00:00Z')).toBe(1)
+    expect(deepSeekUsdBillFactor('dsh', 'deepseek-v4-pro', '2026-09-28T12:00:00Z')).toBe(0.5)
+    expect(deepSeekUsdBillFactor('claude', 'deepseek-flash', '2026-09-28T08:00:00Z')).toBe(1)
+    expect(deepSeekUsdBillFactor('claude', 'deepseek-v4-flash', '2026-05-20T10:01:00Z')).toBe(0.5)
+    expect(deepSeekUsdBillFactor('dsh', 'deepseek-chat', '2026-09-26T02:00:00Z')).toBe(0.5)
+  })
+
+  it('stays at the peak list rate without a usable timestamp', () => {
+    expect(deepSeekUsdBillFactor('dsh', 'deepseek-v4-pro', undefined)).toBe(1)
+    expect(deepSeekUsdBillFactor('dsh', 'deepseek-v4-pro', '')).toBe(1)
+    expect(deepSeekUsdBillFactor('dsh', 'deepseek-v4-pro', 'not-a-date')).toBe(1)
+    expect(deepSeekUsdBillFactor('claude', 'deepseek-flash', undefined)).toBe(1)
+  })
+
+  it('does not discount gateways, other providers, or non-DeepSeek models', () => {
+    expect(deepSeekUsdBillFactor('openrouter', 'deepseek/deepseek-v4-pro', '2026-09-28T12:00:00Z')).toBe(1)
+    expect(deepSeekUsdBillFactor('zerostack', 'deepseek/deepseek-v4-pro', '2026-09-28T12:00:00Z')).toBe(1)
+    expect(deepSeekUsdBillFactor('claude', 'claude-sonnet-4-6', '2026-09-28T12:00:00Z')).toBe(1)
+    expect(deepSeekUsdBillFactor('zcode', 'glm-5.3', '2026-09-21T12:00:00Z')).toBe(1)
+    expect(deepSeekUsdBillFactor('dsh', 'glm-5.3', '2026-09-28T12:00:00Z')).toBe(1)
   })
 })
 

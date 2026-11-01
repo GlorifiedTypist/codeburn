@@ -6,6 +6,7 @@ import zlib from 'zlib'
 
 import { createDshProvider, readZstdLines } from '../../src/providers/dsh.js'
 import { billableOutputTokens, calculateCost } from '../../src/models.js'
+import { deepSeekUsdBillFactor } from '../../src/peak-hours.js'
 import type { ParsedProviderCall } from '../../src/providers/types.js'
 
 // DSH session logs are concatenations of INDEPENDENT zstd frames (one per
@@ -755,7 +756,9 @@ describe('dsh provider - parsing', () => {
     expect(billableOutputTokens('dsh', calls[0]!.outputTokens, calls[0]!.reasoningTokens)).toBe(100)
     // DSH's TokenUsage reasoningTokens is informational detail already
     // included in outputTokens, so the output bucket is billed exactly once.
-    expect(calls[0]!.costUSD).toBeCloseTo(calculateCost('deepseek-v4-pro', 1000, 100, 50, 500, 0), 12)
+    // 2026-08-14T11:35:40Z is a Friday after 10:00 UTC: off-peak, half the peak list.
+    expect(deepSeekUsdBillFactor('dsh', 'deepseek-v4-pro', calls[0]!.timestamp)).toBe(0.5)
+    expect(calls[0]!.costUSD).toBeCloseTo(calculateCost('deepseek-v4-pro', 1000, 100, 50, 500, 0) * 0.5, 12)
   })
 
   it('collects mapped tools, skill names and bash commands from tool/call events', async () => {
@@ -915,7 +918,10 @@ describe('dsh provider - real log fidelity', () => {
     })
     expect(calls[1]).toMatchObject({ inputTokens: 168, outputTokens: 25, cacheReadInputTokens: 2816, reasoningTokens: 22 })
     // Reasoning is a subset of output, so it must not be added a second time.
-    expect(calls[0]!.costUSD).toBe(calculateCost('deepseek-v4-flash', 2877, 90, 0, 0, 0))
+    // The fixture's final usage stamp is Monday 2026-08-03 04:13 UTC, in the
+    // gap between the two peak windows, so the bill is half the peak list.
+    expect(deepSeekUsdBillFactor('dsh', 'deepseek-v4-flash', calls[0]!.timestamp)).toBe(0.5)
+    expect(calls[0]!.costUSD).toBe(calculateCost('deepseek-v4-flash', 2877, 90, 0, 0, 0) * 0.5)
     expect(calls[0]!.costUSD).toBeGreaterThan(0)
   })
 

@@ -5,6 +5,7 @@ import { createHash } from 'crypto'
 import { getCodeburnCacheDir } from './cache-dir.js'
 import snapshotData from './data/litellm-snapshot.json' with { type: 'json' }
 import fallbackData from './data/pricing-fallback.json' with { type: 'json' }
+import { deepSeekOfficialPeakTuples, deepSeekUnlistedFallbackId } from './deepseek-rates.js'
 import { fetchWithTimeout } from './fetch-utils.js'
 
 export type ModelCosts = {
@@ -117,14 +118,21 @@ const ONE_HOUR_CACHE_WRITE_MULTIPLIER_FROM_FIVE_MINUTE_RATE = 1.6
 // output, $0.20 cache read; composer-1.5: $3.50/$17.50/$0.35; composer-1:
 // $1.25/$10/$0.125. Cursor publishes no separate cache-write rate for these,
 // so cache write uses the input rate.
+// DeepSeek V4 Pro and Flash peak rates are pinned in deepseek-rates.ts
+// (api-docs.deepseek.com, fetched 2026-11-01). Off-peak is applied per call
+// in peak-hours.ts, not by a second row here. Cache write is 0.
 // deepseek-v3.2: DeepSeek's last published price was $0.28 miss / $0.028 hit /
 // $0.42 output; LiteLLM's deepseek/deepseek-v3.2 row says $0.40 output while its
 // own deepseek-chat row says $0.42. Drop once upstream corrects it.
+// deepseek-chat and deepseek-reasoner are not pinned: the catalog row is the
+// last published rate for those retired names. If that row disappears,
+// getModelCosts falls back to Flash (deepseek-rates.ts).
 // swe-2: Cognition's list price at docs.devin.ai/desktop/models, $3 input, $15
 // output, $0.30 cache read per 1M, no cache-write rate. Plan promotions (free on
 // self-serve until 15 Oct 2026, 75% off for enterprise until 31 Dec 2026) are
 // left out, as they depend on the plan.
 const BUILTIN_PRICE_OVERRIDES: Record<string, SnapshotEntry> = {
+  ...deepSeekOfficialPeakTuples(),
   'deepseek-v3.2': [0.28e-6, 0.42e-6, null, 0.028e-6],
   'swe-2': [3e-6, 15e-6, null, 0.3e-6],
   'composer-2.5': [0.5e-6, 2.5e-6, 0.5e-6, 0.2e-6],
@@ -1360,6 +1368,15 @@ export function getModelCosts(model: string): ModelCosts | null {
     if (variantCosts) return variantCosts
   }
 
+  // Retired DeepSeek names (deepseek-chat, deepseek-reasoner). A catalog row
+  // above wins; this runs only when that row is gone, and prices them as
+  // Flash rather than $0. The target is a listed model, so this does not recurse.
+  const fallbackId = deepSeekUnlistedFallbackId(canonical) ?? deepSeekUnlistedFallbackId(withPrefix)
+  if (fallbackId) {
+    const fallback = getModelCosts(fallbackId)
+    if (fallback) return fallback
+  }
+
   return null
 }
 
@@ -1643,6 +1660,7 @@ const SHORT_NAMES: Record<string, string> = {
   'kimi-latest': 'Kimi Latest',
   'moonshot-v1': 'Moonshot v1',
   'deepseek-v4-pro': 'DeepSeek v4 Pro',
+  'deepseek-flash': 'DeepSeek Flash',
   'deepseek-v4-flash': 'DeepSeek v4 Flash',
   'deepseek-coder-max': 'DeepSeek Coder Max',
   'deepseek-coder': 'DeepSeek Coder',

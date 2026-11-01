@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { buildMenubarPayload, type CombinedUsage, type LocalModelSavings, type PeriodData, type ProviderCost } from '../src/menubar-json.js'
+import { buildDeepSeekSchedule, buildMenubarPayload, type CombinedUsage, type LocalModelSavings, type PeriodData, type ProviderCost } from '../src/menubar-json.js'
 import { getShortModelName } from '../src/models.js'
 import type { OptimizeResult } from '../src/optimize.js'
 
@@ -35,6 +35,8 @@ describe('buildMenubarPayload', () => {
     const payload = buildMenubarPayload(period, [], null)
 
     expect(payload.generated).toMatch(/^\d{4}-\d{2}-\d{2}T/)
+    expect(payload.deepseek?.phase === 'peak' || payload.deepseek?.phase === 'off-peak').toBe(true)
+    expect(payload.deepseek?.nextChangeAt! > payload.generated).toBe(true)
     expect(payload.current.label).toBe('7 Days')
     expect(payload.current.cost).toBe(1248.01)
     expect(payload.current.calls).toBe(11231)
@@ -665,5 +667,49 @@ describe('buildMenubarPayload', () => {
     expect(payload.current.localModelSavings.byModel).toEqual(localModelSavings.byModel)
     expect(payload.current.localModelSavings.byModel[0]!.outputTokens).toBe(13)
     expect(payload.current.localModelSavings.byModel[1]!.outputTokens).toBe(10)
+  })
+})
+
+describe('buildDeepSeekSchedule', () => {
+  it('reports the phase, the next UTC change, and both rate cards', () => {
+    const peak = buildDeepSeekSchedule(new Date('2026-09-28T02:30:00Z'))
+    expect(peak.phase).toBe('peak')
+    expect(peak.nextChangeAt).toBe('2026-09-28T04:00:00.000Z')
+    expect(peak.holiday).toBe(false)
+    expect(peak.missingTimestamp).toBe('peak')
+    expect(peak.appliesToProviders).toEqual(['dsh', 'claude'])
+    expect(peak.offPeakFactor).toBe(0.5)
+    expect(peak.peakWindowsUtc).toEqual([
+      { start: '01:00', end: '04:00' },
+      { start: '06:00', end: '10:00' },
+    ])
+
+    const pro = peak.models.find(model => model.id === 'deepseek-v4-pro')
+    const flash = peak.models.find(model => model.id === 'deepseek-flash')
+    expect(pro).toEqual({
+      id: 'deepseek-v4-pro',
+      label: 'DeepSeek v4 Pro',
+      alsoBilledAs: ['deepseek/deepseek-v4-pro', 'deepseek-v4-pro-0813', 'deepseek/deepseek-v4-pro-0813'],
+      peak: { inputCacheHitPerMillion: 0.044, inputCacheMissPerMillion: 1.32, outputPerMillion: 3.96 },
+      offPeak: { inputCacheHitPerMillion: 0.022, inputCacheMissPerMillion: 0.66, outputPerMillion: 1.98 },
+    })
+    expect(flash?.peak).toEqual({ inputCacheHitPerMillion: 0.006, inputCacheMissPerMillion: 0.3, outputPerMillion: 1.2 })
+    expect(flash?.offPeak).toEqual({ inputCacheHitPerMillion: 0.003, inputCacheMissPerMillion: 0.15, outputPerMillion: 0.6 })
+    expect(flash?.alsoBilledAs).toEqual(expect.arrayContaining([
+      'deepseek-v4-flash',
+      'deepseek-v4-flash-vision-exp',
+      'deepseek-v4.1-flash',
+    ]))
+    expect(peak.unlistedFallback).toEqual({
+      'deepseek-chat': 'deepseek-flash',
+      'deepseek-reasoner': 'deepseek-flash',
+    })
+  })
+
+  it('stays off-peak across a holiday morning and names Monday as the next peak', () => {
+    const holiday = buildDeepSeekSchedule(new Date('2026-09-25T02:00:00Z'))
+    expect(holiday.phase).toBe('off-peak')
+    expect(holiday.holiday).toBe(true)
+    expect(holiday.nextChangeAt).toBe('2026-09-28T01:00:00.000Z')
   })
 })
