@@ -37,6 +37,8 @@ describe('buildMenubarPayload', () => {
     expect(payload.generated).toMatch(/^\d{4}-\d{2}-\d{2}T/)
     expect(payload.deepseek?.phase === 'peak' || payload.deepseek?.phase === 'off-peak').toBe(true)
     expect(payload.deepseek?.nextChangeAt! > payload.generated).toBe(true)
+    expect(payload.deepseek).toHaveProperty('nextHoliday')
+    expect(typeof payload.deepseek?.holiday).toBe('boolean')
     expect(payload.current.label).toBe('7 Days')
     expect(payload.current.cost).toBe(1248.01)
     expect(payload.current.calls).toBe(11231)
@@ -676,6 +678,7 @@ describe('buildDeepSeekSchedule', () => {
     expect(peak.phase).toBe('peak')
     expect(peak.nextChangeAt).toBe('2026-09-28T04:00:00.000Z')
     expect(peak.holiday).toBe(false)
+    expect(peak.nextHoliday).toEqual({ start: '2026-10-01', end: '2026-10-07' })
     expect(peak.missingTimestamp).toBe('peak')
     expect(peak.appliesToProviders).toEqual(['dsh', 'claude'])
     expect(peak.offPeakFactor).toBe(0.5)
@@ -710,6 +713,73 @@ describe('buildDeepSeekSchedule', () => {
     const holiday = buildDeepSeekSchedule(new Date('2026-09-25T02:00:00Z'))
     expect(holiday.phase).toBe('off-peak')
     expect(holiday.holiday).toBe(true)
+    expect(holiday.nextHoliday).toEqual({ start: '2026-09-25', end: '2026-09-25' })
     expect(holiday.nextChangeAt).toBe('2026-09-28T01:00:00.000Z')
+  })
+
+  it('collapses the next multi-day holiday when today is before it', () => {
+    // 2026-04-20 is after Qingming (04-06) and before Labour Day week.
+    const before = buildDeepSeekSchedule(new Date('2026-04-20T12:00:00Z'))
+    expect(before.holiday).toBe(false)
+    expect(before.nextHoliday).toEqual({ start: '2026-05-01', end: '2026-05-05' })
+
+    // New Year's Day is its own run. The following run is Spring Festival week.
+    const afterNewYear = buildDeepSeekSchedule(new Date('2026-01-02T00:00:00Z'))
+    expect(afterNewYear.holiday).toBe(false)
+    expect(afterNewYear.nextHoliday).toEqual({ start: '2026-02-16', end: '2026-02-22' })
+
+    // Dragon Boat 2025 is one run even though it crosses from May into June.
+    const beforeDragonBoat = buildDeepSeekSchedule(new Date('2025-05-20T00:00:00Z'))
+    expect(beforeDragonBoat.nextHoliday).toEqual({ start: '2025-05-31', end: '2025-06-02' })
+  })
+
+  it('is null once the UTC date is after the last listed day', () => {
+    const lastDay = buildDeepSeekSchedule(new Date('2027-10-03T15:00:00Z'))
+    expect(lastDay.holiday).toBe(true)
+    expect(lastDay.nextHoliday).toEqual({ start: '2027-10-01', end: '2027-10-03' })
+
+    const after = buildDeepSeekSchedule(new Date('2027-10-04T08:00:00Z'))
+    expect(after.holiday).toBe(false)
+    expect(after.nextHoliday).toBeNull()
+    expect(after.phase).toBe('peak')
+    expect(after.nextChangeAt).toBe('2027-10-04T10:00:00.000Z')
+  })
+
+  it('reports the run already underway, from its first day through its last', () => {
+    const first = buildDeepSeekSchedule(new Date('2026-10-01T00:00:00Z'))
+    const middle = buildDeepSeekSchedule(new Date('2026-10-04T08:00:00Z'))
+    const last = buildDeepSeekSchedule(new Date('2026-10-07T23:59:59Z'))
+    for (const schedule of [first, middle, last]) {
+      expect(schedule.holiday).toBe(true)
+      expect(schedule.phase).toBe('off-peak')
+      expect(schedule.nextHoliday).toEqual({ start: '2026-10-01', end: '2026-10-07' })
+    }
+
+    // A one-day holiday stays that day. National Day remains the following run.
+    const midAutumn = buildDeepSeekSchedule(new Date('2026-09-25T02:00:00Z'))
+    expect(midAutumn.holiday).toBe(true)
+    expect(midAutumn.nextHoliday).toEqual({ start: '2026-09-25', end: '2026-09-25' })
+    const dayAfter = buildDeepSeekSchedule(new Date('2026-09-26T00:00:00Z'))
+    expect(dayAfter.holiday).toBe(false)
+    expect(dayAfter.nextHoliday).toEqual({ start: '2026-10-01', end: '2026-10-07' })
+  })
+
+  it('crosses the year boundary to the next listed day', () => {
+    // National Day 2026 ends 10-07. The next listed day is 2027-01-01.
+    const november = buildDeepSeekSchedule(new Date('2026-11-01T00:00:00Z'))
+    expect(november.holiday).toBe(false)
+    expect(november.nextHoliday).toEqual({ start: '2027-01-01', end: '2027-01-01' })
+
+    const newYearsEve = buildDeepSeekSchedule(new Date('2026-12-31T23:00:00Z'))
+    expect(newYearsEve.holiday).toBe(false)
+    expect(newYearsEve.nextHoliday).toEqual({ start: '2027-01-01', end: '2027-01-01' })
+
+    const newYear = buildDeepSeekSchedule(new Date('2027-01-01T12:00:00Z'))
+    expect(newYear.holiday).toBe(true)
+    expect(newYear.nextHoliday).toEqual({ start: '2027-01-01', end: '2027-01-01' })
+
+    const dayAfter = buildDeepSeekSchedule(new Date('2027-01-02T00:00:00Z'))
+    expect(dayAfter.holiday).toBe(false)
+    expect(dayAfter.nextHoliday).toEqual({ start: '2027-02-05', end: '2027-02-08' })
   })
 })

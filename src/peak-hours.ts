@@ -98,6 +98,44 @@ export function isChinesePublicHolidayUtc(instant: Date): boolean {
   return CHINESE_PUBLIC_HOLIDAYS.has(utcDateKey(instant))
 }
 
+/// Inclusive UTC dates (YYYY-MM-DD) of one contiguous holiday run.
+export type ChinesePublicHolidayRun = {
+  /// First day of the run.
+  start: string
+  /// Last day of the run.
+  end: string
+}
+
+function nextUtcDateKey(isoDate: string): string {
+  const year = Number(isoDate.slice(0, 4))
+  const month = Number(isoDate.slice(5, 7))
+  const day = Number(isoDate.slice(8, 10))
+  // Date.UTC rolls the day past the end of a month or year.
+  return utcDateKey(new Date(Date.UTC(year, month - 1, day + 1)))
+}
+
+function chinesePublicHolidayRuns(): ChinesePublicHolidayRun[] {
+  const dates = [...CHINESE_PUBLIC_HOLIDAYS].sort()
+  const runs: ChinesePublicHolidayRun[] = []
+  for (const date of dates) {
+    const open = runs.length > 0 ? runs[runs.length - 1] : undefined
+    if (open && nextUtcDateKey(open.end) === date) open.end = date
+    else runs.push({ start: date, end: date })
+  }
+  return runs
+}
+
+/// The run that contains `instant`'s UTC calendar date, or the earliest run
+/// that starts after that date. Null when the loaded calendar has neither.
+/// Listed dates one UTC calendar day apart are a single run.
+export function nextChinesePublicHolidayRun(instant: Date): ChinesePublicHolidayRun | null {
+  const today = utcDateKey(instant)
+  for (const run of chinesePublicHolidayRuns()) {
+    if (run.end >= today) return { start: run.start, end: run.end }
+  }
+  return null
+}
+
 /// The next UTC instant at which deepSeekPhase flips. Edges are 01:00, 04:00,
 /// 06:00 and 10:00, and only on a non-holiday weekday, so those are the only
 /// candidates. The returned instant is strictly after `instant`.

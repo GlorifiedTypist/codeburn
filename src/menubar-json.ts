@@ -151,7 +151,13 @@ import {
   offPeakRates,
   type DeepSeekTokenRates,
 } from './deepseek-rates.js'
-import { deepSeekPhase, isChinesePublicHolidayUtc, nextDeepSeekPhaseChange } from './peak-hours.js'
+import {
+  deepSeekPhase,
+  isChinesePublicHolidayUtc,
+  nextChinesePublicHolidayRun,
+  nextDeepSeekPhaseChange,
+  type ChinesePublicHolidayRun,
+} from './peak-hours.js'
 import type { ReworkedFile } from './workflow-insights.js'
 import type { PrRow, BranchRow } from './sessions-report.js'
 import type { LiveSessionsBlock } from './live-sessions.js'
@@ -291,7 +297,8 @@ export type DeepSeekModelRates = {
 }
 
 /// Current DeepSeek peak schedule, so a menubar plugin can render peak vs
-/// off-peak without reimplementing the windows or the holiday calendar.
+/// off-peak, and the next Chinese public-holiday run, without reimplementing
+/// the windows or the calendar.
 /// Add-only. Absent on CLIs that predate the field.
 export type DeepSeekSchedule = {
   /// 'peak' or 'off-peak' at the payload's `generated` instant.
@@ -307,6 +314,16 @@ export type DeepSeekSchedule = {
   /// True when the UTC date of `generated` is a Chinese public holiday, which
   /// makes the whole day off-peak even inside a peak window.
   holiday: boolean
+  /// Contiguous Chinese public-holiday run for the UTC calendar date of
+  /// `generated`. Dates in the loaded calendar that follow one another by one
+  /// UTC day collapse into one period (a Spring Festival week is one object).
+  ///
+  /// When that date falls inside a run, this is that run: `holiday` is true
+  /// and `start` is the run's first day, which may be before `generated`.
+  /// When it does not, this is the earliest run whose `start` is strictly
+  /// after that date. Null when the loaded calendar has no such run.
+  /// `start` and `end` are inclusive YYYY-MM-DD UTC dates.
+  nextHoliday: ChinesePublicHolidayRun | null
   /// off-peak rate = peak rate * offPeakFactor, for every model and token class.
   offPeakFactor: number
   /// A usage record with no usable timestamp is billed at the peak list rate.
@@ -352,6 +369,7 @@ export function buildDeepSeekSchedule(now: Date): DeepSeekSchedule {
       { start: '06:00', end: '10:00' },
     ],
     holiday: isChinesePublicHolidayUtc(now),
+    nextHoliday: nextChinesePublicHolidayRun(now),
     offPeakFactor: DEEPSEEK_OFF_PEAK_FACTOR,
     missingTimestamp: 'peak',
     appliesToProviders: ['dsh', 'claude'],

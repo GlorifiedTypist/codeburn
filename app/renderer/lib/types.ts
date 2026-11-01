@@ -189,6 +189,10 @@ export type MenubarPayload = {
     peakDaysUtc: 'Mon-Fri'
     peakWindowsUtc: Array<{ start: string; end: string }>
     holiday: boolean
+    /** Run covering the UTC date of `generated`, or the next run after it.
+     *  Null when the loaded calendar has nothing left. `start` and `end` are
+     *  inclusive YYYY-MM-DD. See src/menubar-json.ts DeepSeekSchedule. */
+    nextHoliday: { start: string; end: string } | null
     offPeakFactor: number
     missingTimestamp: 'peak'
     appliesToProviders: string[]
