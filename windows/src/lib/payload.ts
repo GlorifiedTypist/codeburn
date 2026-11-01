@@ -3,6 +3,27 @@
 /// (macOS app). Any field change there must land here too or the frontend silently drops it.
 export type MenubarPayload = {
   generated: string
+  /// DeepSeek peak schedule from `status --format menubar-json`. Add-only;
+  /// absent on CLIs that predate it. See src/menubar-json.ts DeepSeekSchedule.
+  deepseek?: {
+    phase: 'peak' | 'off-peak'
+    nextChangeAt: string
+    timezone: 'UTC'
+    peakDaysUtc: 'Mon-Fri'
+    peakWindowsUtc: Array<{ start: string; end: string }>
+    holiday: boolean
+    offPeakFactor: number
+    missingTimestamp: 'peak'
+    appliesToProviders: string[]
+    models: Array<{
+      id: string
+      label: string
+      alsoBilledAs: string[]
+      peak: { inputCacheHitPerMillion: number; inputCacheMissPerMillion: number; outputPerMillion: number }
+      offPeak: { inputCacheHitPerMillion: number; inputCacheMissPerMillion: number; outputPerMillion: number }
+    }>
+    unlistedFallback: Record<string, string>
+  }
   current: {
     label: string
     cost: number

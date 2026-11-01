@@ -6,9 +6,10 @@ import { spawnSync } from 'node:child_process'
 import { describe, expect, it } from 'vitest'
 
 // End-to-end proof for the peak-hours split: two DSH DeepSeek sessions, one
-// stamped in a peak window (Mon 2026-09-28 02:00 UTC) and one off-peak
+// stamped in a peak window (Mon 2026-09-21 02:00 UTC) and one off-peak
 // (same day 12:00 UTC). `codeburn models --format json` must report one
-// deepseek-chat row whose peakUSD/offPeakUSD split the stored list-rate cost.
+// deepseek-chat row whose costUSD is the time-of-day bill (off-peak at half
+// the catalog rate) and whose peakUSD/offPeakUSD still add back up to it.
 function runCli(args: string[], home: string) {
   return spawnSync(process.execPath, ['--import', 'tsx', 'src/cli.ts', ...args], {
     cwd: process.cwd(),
@@ -83,13 +84,12 @@ describe('CLI peak-hours split (DeepSeek)', () => {
       const rows = JSON.parse(result.stdout) as Array<Record<string, unknown>>
       const chat = rows.find(r => String(r['model']).includes('deepseek-chat'))
       expect(chat).toBeDefined()
-      // Snapshot list rate: input 2.8e-7, output 4.2e-7 per token.
-      // One session = 1M in + 100k out = $0.28 + $0.042 = $0.322 list.
-      expect(chat!['costUSD']).toBeCloseTo(0.644, 6)
-      // Consumption shares of the list-rate cost: they add back up to
-      // costUSD. DeepSeek's own bill applies the 0.5x off-peak discount.
+      // Catalog rate for the retired deepseek-chat name: input 2.8e-7, output
+      // 4.2e-7 per token. One session = 1M in + 100k out = $0.322 at peak.
+      // The 12:00 UTC session is off-peak, so its stored cost is half.
+      expect(chat!['costUSD']).toBeCloseTo(0.483, 6)
       expect(chat!['peakUSD']).toBeCloseTo(0.322, 6)
-      expect(chat!['offPeakUSD']).toBeCloseTo(0.322, 6)
+      expect(chat!['offPeakUSD']).toBeCloseTo(0.161, 6)
       expect(chat!['peakUSD'] as number + (chat!['offPeakUSD'] as number)).toBeCloseTo(chat!['costUSD'] as number, 6)
       expect(chat!['peakKind']).toBe('deepseek-usd')
     } finally {

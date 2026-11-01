@@ -228,8 +228,9 @@ describe('aggregateModels', () => {
     ])])
     expect(rows).toHaveLength(1)
     const row = rows[0]!
-    // Shares of the stored list-rate cost: they add back up to costUSD. The
-    // 0.5x off-peak discount lives on DeepSeek's bill, not in this report.
+    // The split buckets the stored costUSD and does not apply a further
+    // discount. Time-of-day pricing happens when the call is priced; these
+    // injected costs are taken as given and still add back up.
     expect(row.costUSD).toBeCloseTo(6, 6)
     expect(row.peakUSD).toBeCloseTo(2, 6)
     expect(row.offPeakUSD).toBeCloseTo(4, 6)

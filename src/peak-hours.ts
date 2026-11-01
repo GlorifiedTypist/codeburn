@@ -1,6 +1,7 @@
 // Peak-hours billing windows for vendors that price peak vs off-peak usage.
 //
-// Sources (checked 2026-09-25):
+// Sources (pricing rechecked 2026-11-01; holiday list in
+// src/data/chinese-public-holidays.ts):
 // - DeepSeek API docs (api-docs.deepseek.com/quick_start/pricing): off-peak
 //   rates are half (0.5x) of the peak (list) rates. Peak hours are 01:00-04:00
 //   and 06:00-10:00 UTC, Monday-Friday, excluding Chinese public holidays.
@@ -10,12 +11,14 @@
 //   14:00-18:00 Singapore time (SGT = UTC+8). The discount applies to plan
 //   CREDITS, not to USD pricing.
 //
-// Design: this module only classifies a call's timestamp into
-// peak/off-peak/unknown. Costs are never repriced here — the report splits
-// the stored list-rate cost between the windows, so the legs always add back
-// up to the Cost column. Repricing (DeepSeek's 0.5x bill) is the vendor's
-// job; showing guessed dollars here would double-discount routes whose cost
-// was already reported with the discount applied.
+// Design: this module classifies a call's timestamp into peak/off-peak/unknown
+// and, for DeepSeek USD bills, exposes the multiplier the pricer applies.
+// deepSeekUsdBillFactor is 0.5 off-peak and 1 at peak. It is 1 when the
+// timestamp is missing or the route is not billed on DeepSeek's schedule, so
+// a gateway's uniform price and a reported cost are never discounted here.
+// The models report still splits stored costUSD by window; for DeepSeek that
+// stored cost is already the time-of-day bill, and the legs still add back
+// up to the Cost column.
 //
 // Classification is restricted to first-party routes: the vendor's discount
 // only exists where the vendor bills directly. The same model reached through
@@ -25,6 +28,8 @@
 // cost. The first-party set below must therefore stay disjoint from
 // REPORTED_COST_PROVIDERS; a provider joining that set can never appear here.
 
+import { CHINESE_PUBLIC_HOLIDAYS as CHINESE_PUBLIC_HOLIDAY_DATES } from './data/chinese-public-holidays.js'
+import { DEEPSEEK_OFF_PEAK_FACTOR } from './deepseek-rates.js'
 import { resolveCanonicalModelId } from './models.js'
 
 /// How a route's vendor treats peak-hour usage.
@@ -36,38 +41,13 @@ export type PeakBillingKind =
 
 export type PeakClass = 'peak' | 'off-peak' | 'unknown'
 
-// Chinese public holidays (observed dates, YYYY-MM-DD), verified against the
-// State Council's announcements. Only the date matters: any DeepSeek call
-// landing on one of these days is off-peak for the whole day. Years are NOT
-// projected ahead — future holiday dates would be guesses; a year not covered
-// here treats weekdays as peak (never underestimates cost), and
-// deepSeekHolidayCoverageYears() lets a test fail the moment the current
-// year drops out of the list.
-const CHINESE_PUBLIC_HOLIDAYS: ReadonlySet<string> = new Set([
-  // 2025: New Year 01-01; Spring Festival 01-28..02-04; Qingming 04-04;
-  // Labour Day 05-01..05-05; Dragon Boat 05-31..06-02;
-  // Mid-Autumn + National Day 10-01..10-08.
-  '2025-01-01',
-  '2025-01-28', '2025-01-29', '2025-01-30', '2025-01-31',
-  '2025-02-01', '2025-02-02', '2025-02-03', '2025-02-04',
-  '2025-04-04',
-  '2025-05-01', '2025-05-02', '2025-05-03', '2025-05-04', '2025-05-05',
-  '2025-05-31', '2025-06-01', '2025-06-02',
-  '2025-10-01', '2025-10-02', '2025-10-03', '2025-10-04',
-  '2025-10-05', '2025-10-06', '2025-10-07', '2025-10-08',
-  // 2026: New Year 01-01; Spring Festival 02-16..02-22 (eve 02-16);
-  // Qingming 04-06; Labour Day 05-01..05-05; Dragon Boat 06-19;
-  // Mid-Autumn 09-25; National Day 10-01..10-07.
-  '2026-01-01',
-  '2026-02-16', '2026-02-17', '2026-02-18', '2026-02-19',
-  '2026-02-20', '2026-02-21', '2026-02-22',
-  '2026-04-06',
-  '2026-05-01', '2026-05-02', '2026-05-03', '2026-05-04', '2026-05-05',
-  '2026-06-19',
-  '2026-09-25',
-  '2026-10-01', '2026-10-02', '2026-10-03', '2026-10-04',
-  '2026-10-05', '2026-10-06', '2026-10-07',
-])
+// Observed Chinese public holidays. The list, its sources, and how to refresh
+// it live in src/data/chinese-public-holidays.ts. A year that is not in the
+// list treats weekdays as peak (never applies an unsourced discount).
+const CHINESE_PUBLIC_HOLIDAYS: ReadonlySet<string> = new Set(CHINESE_PUBLIC_HOLIDAY_DATES)
+
+// Peak-window edges, minutes from UTC midnight, [start, end).
+const DEEPSEEK_PEAK_EDGES_MINUTES = [60, 240, 360, 600] as const
 
 /// Years the DeepSeek holiday calendar above covers. A test pins the current
 /// year to this set so the calendar cannot silently go stale.
@@ -106,6 +86,36 @@ export function isDeepSeekPeak(instant: Date): boolean {
   if (CHINESE_PUBLIC_HOLIDAYS.has(utcDateKey(instant))) return false
   const minutes = instant.getUTCHours() * 60 + instant.getUTCMinutes()
   return (minutes >= 60 && minutes < 240) || (minutes >= 360 && minutes < 600)
+}
+
+export type DeepSeekPhase = 'peak' | 'off-peak'
+
+export function deepSeekPhase(instant: Date): DeepSeekPhase {
+  return isDeepSeekPeak(instant) ? 'peak' : 'off-peak'
+}
+
+export function isChinesePublicHolidayUtc(instant: Date): boolean {
+  return CHINESE_PUBLIC_HOLIDAYS.has(utcDateKey(instant))
+}
+
+/// The next UTC instant at which deepSeekPhase flips. Edges are 01:00, 04:00,
+/// 06:00 and 10:00, and only on a non-holiday weekday, so those are the only
+/// candidates. The returned instant is strictly after `instant`.
+export function nextDeepSeekPhaseChange(instant: Date): Date {
+  const start = instant.getTime()
+  const phase = isDeepSeekPeak(instant)
+  const year = instant.getUTCFullYear()
+  const month = instant.getUTCMonth()
+  const day = instant.getUTCDate()
+  for (let offset = 0; offset < 21; offset++) {
+    const dayStart = Date.UTC(year, month, day + offset)
+    for (const minutes of DEEPSEEK_PEAK_EDGES_MINUTES) {
+      const time = dayStart + minutes * 60_000
+      if (time <= start) continue
+      if (isDeepSeekPeak(new Date(time)) !== phase) return new Date(time)
+    }
+  }
+  return new Date(Date.UTC(year, month, day + 21))
 }
 
 /// True when the instant falls in a Z.ai peak window: Mon-Fri 14:00-18:00
@@ -186,4 +196,30 @@ export function classifyPeak(provider: string, model: string, timestamp: string 
   if (!instant) return 'unknown'
   const peak = kind === 'deepseek-usd' ? isDeepSeekPeak(instant) : isZaiPeak(instant)
   return peak ? 'peak' : 'off-peak'
+}
+
+/// Providers whose token-priced DeepSeek calls use DeepSeek's own peak
+/// schedule. `dsh` is the DeepSeek API client. `claude` covers Claude-compatible
+/// transcripts whose model id is a DeepSeek API model and which are priced from
+/// DeepSeek's table (see the v4 Claude pricing regression). Gateways
+/// (openrouter, zerostack, vercel, ...) stay at their uniform price.
+const DEEPSEEK_SCHEDULE_PROVIDERS: ReadonlySet<string> = new Set(['dsh', 'claude'])
+
+function billsDeepSeekSchedule(provider: string, model: string): boolean {
+  if (!DEEPSEEK_SCHEDULE_PROVIDERS.has(provider)) return false
+  // Reuse the first-party model gate with the provider forced to dsh, so a
+  // Claude transcript and a DSH session accept the same model ids.
+  return peakBillingKind('dsh', model) === 'deepseek-usd'
+}
+
+/// Scale a peak-list cost to the rate in force at `timestamp`.
+/// 1 at peak, DEEPSEEK_OFF_PEAK_FACTOR off-peak.
+/// Missing or unparseable timestamps stay at 1 (the peak list rate): off-peak
+/// is a discount, applied only when the call's own timestamp proves the window.
+/// Routes that are not on DeepSeek's schedule also stay at 1.
+export function deepSeekUsdBillFactor(provider: string, model: string, timestamp: string | undefined): number {
+  if (!billsDeepSeekSchedule(provider, model)) return 1
+  const instant = parseInstant(timestamp)
+  if (!instant) return 1
+  return isDeepSeekPeak(instant) ? 1 : DEEPSEEK_OFF_PEAK_FACTOR
 }

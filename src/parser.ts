@@ -5,6 +5,7 @@ import { createHash } from 'crypto'
 import { performance } from 'node:perf_hooks'
 import { basename, dirname, join, resolve, sep } from 'path'
 import { FS_SCAN_CONCURRENCY, mapWithConcurrency, readSessionLines } from './fs-utils.js'
+import { deepSeekUsdBillFactor } from './peak-hours.js'
 import { billableOutputTokens, calculateCost, calculateLocalModelSavings, getShortModelName, modelRowKey, pricingModelAt, isProxiedPath, getProxyPathsConfigHash, getModelAliasesConfigHash, getPriceOverridesConfigHash, getLocalModelSavingsConfigHash, recordedCostFallback, getModelRoute, isStandInPricedAt } from './models.js'
 import { resolveSubagentAttribution, sessionIdentity } from './sessions-report.js'
 import { applyCodexSessionNames } from './codex-session-index.js'
@@ -1519,7 +1520,7 @@ export function parseApiCall(entry: JournalEntry, toolResultMeta?: Map<string, T
     usage.speed ?? 'standard',
     cacheCreation.oneHourTokens,
     'claude',
-  )
+  ) * deepSeekUsdBillFactor('claude', msg.model, entry.timestamp)
 
   const bashCmds = extractBashCommandsFromContent(contentBlocks)
 
@@ -1632,7 +1633,7 @@ export function parseAdvisorCalls(entry: JournalEntry): ParsedApiCall[] {
       speed,
       cacheCreation.oneHourTokens,
       'claude',
-    )
+    ) * deepSeekUsdBillFactor('claude', model, entry.timestamp)
 
     calls.push(applyLocalModelSavings({
       provider: 'claude',
@@ -3015,11 +3016,12 @@ function cachedCallToApiCall(call: CachedCall): ParsedApiCall {
   // through billableOutputTokens so a cached read and a cold parse can never
   // disagree about whether reasoning is already inside output (#1075).
   const outputForCost = billableOutputTokens(call.provider, u.outputTokens, u.reasoningTokens)
+  const pricingModel = pricingModelAt(call.model, call.timestamp)
   const costUSD = calculateCost(
-    pricingModelAt(call.model, call.timestamp), u.inputTokens, outputForCost,
+    pricingModel, u.inputTokens, outputForCost,
     u.cacheCreationInputTokens, u.cacheReadInputTokens,
     u.webSearchRequests, call.speed, u.cacheCreationOneHourTokens, call.provider,
-  )
+  ) * deepSeekUsdBillFactor(call.provider, pricingModel, call.timestamp)
   return applyLocalModelSavings({
     provider: call.provider,
     model: call.model,

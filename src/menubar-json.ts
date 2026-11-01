@@ -142,6 +142,16 @@ import type { OptimizeResult } from './optimize.js'
 import { getCurrency } from './currency.js'
 import type { GranularHistory } from './granular-history.js'
 import { getShortModelName, modelRowKey } from './models.js'
+import {
+  DEEPSEEK_FLASH_RATE_IDS,
+  DEEPSEEK_OFF_PEAK_FACTOR,
+  DEEPSEEK_PEAK_USD_PER_MILLION,
+  DEEPSEEK_PRO_RATE_IDS,
+  DEEPSEEK_UNLISTED_FALLBACK,
+  offPeakRates,
+  type DeepSeekTokenRates,
+} from './deepseek-rates.js'
+import { deepSeekPhase, isChinesePublicHolidayUtc, nextDeepSeekPhaseChange } from './peak-hours.js'
 import type { ReworkedFile } from './workflow-insights.js'
 import type { PrRow, BranchRow } from './sessions-report.js'
 import type { LiveSessionsBlock } from './live-sessions.js'
@@ -262,8 +272,101 @@ export type HydrationState = {
   totalFiles: number
 }
 
+/// USD per 1,000,000 tokens for one DeepSeek token class.
+export type DeepSeekRateSet = {
+  inputCacheHitPerMillion: number
+  inputCacheMissPerMillion: number
+  outputPerMillion: number
+}
+
+/// One DeepSeek model's peak and off-peak rate card. `id` is the canonical
+/// model the rates are published under. `alsoBilledAs` lists other ids that
+/// use the same card (legacy names and the deepseek/ prefix).
+export type DeepSeekModelRates = {
+  id: string
+  label: string
+  alsoBilledAs: string[]
+  peak: DeepSeekRateSet
+  offPeak: DeepSeekRateSet
+}
+
+/// Current DeepSeek peak schedule, so a menubar plugin can render peak vs
+/// off-peak without reimplementing the windows or the holiday calendar.
+/// Add-only. Absent on CLIs that predate the field.
+export type DeepSeekSchedule = {
+  /// 'peak' or 'off-peak' at the payload's `generated` instant.
+  phase: 'peak' | 'off-peak'
+  /// ISO-8601 UTC, strictly after `generated`. When `phase` next flips.
+  nextChangeAt: string
+  timezone: 'UTC'
+  /// Weekdays the peak windows apply. Weekends are off-peak all day.
+  peakDaysUtc: 'Mon-Fri'
+  /// Inclusive-exclusive UTC clock windows on a peak day. `end` is the first
+  /// off-peak minute.
+  peakWindowsUtc: Array<{ start: '01:00' | '06:00'; end: '04:00' | '10:00' }>
+  /// True when the UTC date of `generated` is a Chinese public holiday, which
+  /// makes the whole day off-peak even inside a peak window.
+  holiday: boolean
+  /// off-peak rate = peak rate * offPeakFactor, for every model and token class.
+  offPeakFactor: number
+  /// A usage record with no usable timestamp is billed at the peak list rate.
+  missingTimestamp: 'peak'
+  /// Providers whose token-priced DeepSeek calls use this schedule. Other
+  /// providers keep their own uniform price.
+  appliesToProviders: Array<'dsh' | 'claude'>
+  models: DeepSeekModelRates[]
+  /// Retired names priced as `models[].id` only when the pricing catalog has
+  /// no row of their own. A catalog row still wins.
+  unlistedFallback: Record<string, string>
+}
+
+function deepSeekRateSet(rates: DeepSeekTokenRates): DeepSeekRateSet {
+  return {
+    inputCacheHitPerMillion: rates.inputCacheHit,
+    inputCacheMissPerMillion: rates.inputCacheMiss,
+    outputPerMillion: rates.output,
+  }
+}
+
+function deepSeekModelRates(id: string, alsoBilledAs: readonly string[]): DeepSeekModelRates {
+  const peak = DEEPSEEK_PEAK_USD_PER_MILLION[id]!
+  return {
+    id,
+    label: getShortModelName(id),
+    alsoBilledAs: alsoBilledAs.filter(alias => alias !== id),
+    peak: deepSeekRateSet(peak),
+    offPeak: deepSeekRateSet(offPeakRates(peak)),
+  }
+}
+
+/// Schedule at `now`. Exported so tests can pin a boundary without waiting
+/// for the wall clock.
+export function buildDeepSeekSchedule(now: Date): DeepSeekSchedule {
+  return {
+    phase: deepSeekPhase(now),
+    nextChangeAt: nextDeepSeekPhaseChange(now).toISOString(),
+    timezone: 'UTC',
+    peakDaysUtc: 'Mon-Fri',
+    peakWindowsUtc: [
+      { start: '01:00', end: '04:00' },
+      { start: '06:00', end: '10:00' },
+    ],
+    holiday: isChinesePublicHolidayUtc(now),
+    offPeakFactor: DEEPSEEK_OFF_PEAK_FACTOR,
+    missingTimestamp: 'peak',
+    appliesToProviders: ['dsh', 'claude'],
+    models: [
+      deepSeekModelRates('deepseek-v4-pro', DEEPSEEK_PRO_RATE_IDS),
+      deepSeekModelRates('deepseek-flash', DEEPSEEK_FLASH_RATE_IDS),
+    ],
+    unlistedFallback: { ...DEEPSEEK_UNLISTED_FALLBACK },
+  }
+}
+
 export type MenubarPayload = {
   generated: string
+  /// DeepSeek peak/off-peak schedule at `generated`. Add-only; older CLIs omit it.
+  deepseek?: DeepSeekSchedule
   /// Cost and calls for the headline windows this payload's live scan covered,
   /// all from the one aggregation that produced it. A client that lets the user
   /// switch period shows these, so the windows it can display never come from
@@ -818,8 +921,10 @@ export function buildMenubarPayload(
   stale?: boolean,
   hydration?: HydrationState,
 ): MenubarPayload {
+  const generatedAt = new Date()
   const payload: MenubarPayload = {
-    generated: new Date().toISOString(),
+    generated: generatedAt.toISOString(),
+    deepseek: buildDeepSeekSchedule(generatedAt),
     current: {
       label: current.label,
       cost: current.cost,

@@ -3,6 +3,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest'
 
+import { deepSeekUnlistedFallbackId } from '../src/deepseek-rates.js'
 import {
   findUnpricedModels,
   getModelCosts,
@@ -1488,6 +1489,30 @@ describe('DeepSeek v4 models resolve to pricing', () => {
     expect(costs!.outputCostPerToken).toBe(1.2e-6)
     expect(costs!.cacheReadCostPerToken).toBe(6e-9)
     expect(costs!.cacheWriteCostPerToken).toBe(0)
+  })
+
+  it('bills legacy Flash names and V4.1-Flash at the Flash peak rate', () => {
+    const flash = getModelCosts('deepseek-flash')
+    expect(flash).not.toBeNull()
+    expect(flash!.inputCostPerToken).toBe(3e-7)
+    expect(flash!.cacheWriteCostPerToken).toBe(0)
+    for (const id of ['deepseek-v4-flash-vision-exp', 'deepseek-v4.1-flash', 'deepseek/deepseek-flash']) {
+      expect(getModelCosts(id)).toEqual(flash)
+    }
+  })
+
+  it('keeps a catalog row for retired deepseek-chat and names Flash as the fallback', () => {
+    // The pricing page no longer lists deepseek-chat. The bundled catalog still
+    // has the last published v3-era row, and that row wins. Flash is the
+    // stand-in only once the row is gone (see DEEPSEEK_UNLISTED_FALLBACK).
+    const chat = getModelCosts('deepseek-chat')
+    const flash = getModelCosts('deepseek-flash')
+    expect(chat).not.toBeNull()
+    expect(chat!.outputCostPerToken).toBe(4.2e-7)
+    expect(chat!.outputCostPerToken).not.toBe(flash!.outputCostPerToken)
+    expect(deepSeekUnlistedFallbackId('deepseek-chat')).toBe('deepseek-flash')
+    expect(deepSeekUnlistedFallbackId('deepseek/deepseek-reasoner')).toBe('deepseek-flash')
+    expect(deepSeekUnlistedFallbackId('deepseek-flash')).toBeNull()
   })
 
   it('provider-prefixed DeepSeek v4 names resolve to real pricing', () => {

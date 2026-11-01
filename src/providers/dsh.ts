@@ -5,6 +5,7 @@ import zlib from 'zlib'
 
 import { MAX_SESSION_FILE_BYTES, readSessionFile, readSessionLines } from '../fs-utils.js'
 import { billableOutputTokens, calculateCost, getShortModelName } from '../models.js'
+import { deepSeekUsdBillFactor } from '../peak-hours.js'
 import { extractBashCommands } from '../bash-utils.js'
 import type { ProbeRoot, Provider, SessionSource, SessionParser, ParsedProviderCall } from './types.js'
 
@@ -707,7 +708,9 @@ function createParser(source: SessionSource, seenKeys: Set<string>): SessionPars
           // DSH TokenUsage defines reasoning as informational detail already
           // included in outputTokens. Preserve raw output and use the same
           // shared rule as cache rehydration and display (#1075).
+          const timestamp = isoTimestamp(observation.time, sessionStart)
           const costUSD = calculateCost(observation.model, input, billableOutputTokens('dsh', output, reasoning), cacheWrite, cacheRead, 0)
+            * deepSeekUsdBillFactor('dsh', observation.model, timestamp)
           const [turn] = key.split(':').map(Number)
 
           yield {
@@ -725,7 +728,7 @@ function createParser(source: SessionSource, seenKeys: Set<string>): SessionPars
             tools: attempt === bucket.observations.length - 1 ? [...new Set(bucket.tools)] : [],
             bashCommands: attempt === bucket.observations.length - 1 ? bucket.bashCommands : [],
             skills: attempt === bucket.observations.length - 1 && bucket.skills.length > 0 ? [...new Set(bucket.skills)] : undefined,
-            timestamp: isoTimestamp(observation.time, sessionStart),
+            timestamp,
             speed: 'standard',
             deduplicationKey: dedupKey,
             userMessage: userMessageByTurn.get(turn!) ?? '',
