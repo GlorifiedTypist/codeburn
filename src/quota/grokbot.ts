@@ -13,19 +13,21 @@
 // Grok Bot keeps its own copy of the same Cursor session in Electron safe
 // storage, which CodeBurn never decrypts (see src/quota/codex.ts), so this
 // reading is only the app's reading when the IDE is signed into the account
-// Grok Bot uses.
+// Grok Bot uses. Without a usable IDE session the Cursor CLI's login
+// (`cursor-agent`, see cursor.ts) is used the same way, with the same caveat.
 import { existsSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
-import { cursorAccessTokenFromDatabase, cursorDatabasePath } from './cursor.js'
+import { cliLoaderFor, cursorAccessTokenFromDatabase, cursorDatabasePath, resolveCursorAccessToken } from './cursor.js'
 import { quotaRequestSignal, sanitizeError } from './security.js'
 import type { QuotaProvider, QuotaWindow } from './types.js'
 
 const USAGE_ENDPOINT = 'https://api2.cursor.sh/aiserver.v1.DashboardService/GetSandUsageStatus'
 const WINDOW_LABEL = 'Weekly usage'
 const SOURCE_FOOTER = ['Source: Cursor dashboard (the account the Cursor app is signed into)']
-const SIGNED_OUT_FOOTER = ['Sign in to the Cursor app with the account Grok Bot uses, then click Retry.']
+const CLI_SOURCE_FOOTER = ['Source: Cursor dashboard (the account the Cursor CLI is signed into)']
+const SIGNED_OUT_FOOTER = ['Sign in to the Cursor app (or cursor-agent) with the account Grok Bot uses, then click Retry.']
 const REJECTED_FOOTER = ['Cursor rejected the current app session. Sign in again, then click Retry.']
 const UNREADABLE_FOOTER = ["Could not read the Cursor app's local session data. Quit and reopen Cursor, then click Retry."]
 const RATE_LIMITED_FOOTER = ['Cursor rate-limited the quota request.']
@@ -54,6 +56,9 @@ export type GrokbotQuotaDeps = {
   databasePath: string
   /** Resolves the Cursor app's access token; `null` when it is not signed in. */
   loadAccessToken: (databasePath: string) => Promise<string | null>
+  /** Resolves the Cursor CLI's access token; used only without a usable app session. */
+  loadCliAccessToken: () => Promise<string | null>
+  now: () => number
 }
 
 function defaultDeps(): GrokbotQuotaDeps {
@@ -61,6 +66,8 @@ function defaultDeps(): GrokbotQuotaDeps {
     fetch: globalThis.fetch,
     databasePath: cursorDatabasePath(),
     loadAccessToken: cursorAccessTokenFromDatabase,
+    loadCliAccessToken: cliLoaderFor({}),
+    now: Date.now,
   }
 }
 
@@ -110,17 +117,18 @@ export type GrokbotQuotaResult = { quota: QuotaProvider; retryAfterSeconds?: num
 export async function fetchGrokbotQuota(
   options: Partial<GrokbotQuotaDeps> & { signal?: AbortSignal } = {},
 ): Promise<GrokbotQuotaResult> {
-  const deps = { ...defaultDeps(), ...options }
-  let token: string | null
+  const deps = { ...defaultDeps(), ...options, loadCliAccessToken: cliLoaderFor(options) }
+  let resolved: Awaited<ReturnType<typeof resolveCursorAccessToken>>
   try {
-    token = (await deps.loadAccessToken(deps.databasePath))?.trim() || null
+    resolved = await resolveCursorAccessToken(deps, deps.now())
   } catch (error) {
     // Cursor holding a write lock, or a database this build cannot open, is a
     // local condition that clears itself; never a signed-out user.
     console.warn(`Grok Bot quota unavailable: ${sanitizeError(error)}`)
     return { quota: empty('transientFailure', UNREADABLE_FOOTER) }
   }
-  if (!token) return { quota: empty('disconnected', SIGNED_OUT_FOOTER) }
+  if (!resolved) return { quota: empty('disconnected', SIGNED_OUT_FOOTER) }
+  const token = resolved.token
 
   try {
     const response = await deps.fetch(USAGE_ENDPOINT, {
@@ -155,6 +163,7 @@ export async function fetchGrokbotQuota(
     if (decoded === 'pooled') return { quota: empty('terminalFailure', POOLED_FOOTER) }
     if (decoded === 'noAllowance') return { quota: empty('terminalFailure', NO_ALLOWANCE_FOOTER) }
     if (decoded === null) return { quota: empty('transientFailure', PARSE_FOOTER) }
+    if (resolved.source === 'cli') return { quota: { ...decoded, footerLines: CLI_SOURCE_FOOTER } }
     return { quota: decoded }
   } catch (error) {
     console.warn(`Grok Bot quota unavailable: ${sanitizeError(error)}`)

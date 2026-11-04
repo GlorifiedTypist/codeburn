@@ -86,6 +86,9 @@ export type CodeburnConfig = {
   // false stops the automatic download of the Cursor account's own usage
   // export (src/cursor-sync.ts). `codeburn import cursor --sync` still works.
   cursorSync?: boolean
+  // Extra Cursor CLI auth.json to read for the Cursor / Grok Bot quota rows
+  // (e.g. a sandboxed cursor-agent home). CODEBURN_CURSOR_AUTH_FILE wins.
+  cursorAuthFile?: string
 }
 
 // Read synchronously by the aggregator on every period build, so it is set
