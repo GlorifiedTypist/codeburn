@@ -12,8 +12,17 @@
 // Cursor 3.27 stores that token as `cursor-safe-storage:v1:` (Chromium v10).
 // That blob is not an expired login: unlock it with the Cursor Safe Storage
 // keychain item, then apply the same JWT checks as a plaintext token.
+//
+// Fallback credential: the Cursor CLI (`cursor-agent`) keeps its own login in
+// `$XDG_CONFIG_HOME/cursor/auth.json` (default `~/.config/cursor/auth.json`)
+// as `{ accessToken, refreshToken }`. When the app has no usable session the
+// CLI's access token is read the same way: read-only, never refreshed, and
+// subject to the same JWT checks. `CODEBURN_CURSOR_AUTH_FILE` or the
+// `cursorAuthFile` config setting names an extra file to try first (e.g. a
+// sandboxed CLI install with its own home).
 import { createDecipheriv, pbkdf2Sync } from 'node:crypto'
 import { existsSync } from 'node:fs'
+import { readFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
@@ -23,7 +32,8 @@ import type { QuotaProvider, QuotaWindow } from './types.js'
 const USAGE_ENDPOINT = 'https://cursor.com/api/usage-summary'
 const ACCESS_TOKEN_KEY = 'cursorAuth/accessToken'
 const SOURCE_FOOTER = ['Source: Cursor app']
-const SIGNED_OUT_FOOTER = ['Sign in to the Cursor app, then click Retry.']
+const CLI_SOURCE_FOOTER = ['Source: Cursor CLI']
+const SIGNED_OUT_FOOTER = ['Sign in to the Cursor app (or run cursor-agent login), then click Retry.']
 const EXPIRED_FOOTER = ['The Cursor app session is expired or invalid. Sign in again, then click Retry.']
 const REJECTED_FOOTER = ['Cursor rejected the current app session. Sign in again, then click Retry.']
 const UNREADABLE_FOOTER = ["Could not read the Cursor app's local session data. Quit and reopen Cursor, then click Retry."]
@@ -64,6 +74,106 @@ export type CursorDeps = {
   now: () => number
   /** Unlocks `cursor-safe-storage:v1:` tokens. Tests inject this; live uses the login keychain. */
   readKeychain: CursorKeychainReader
+  /** Resolves the Cursor CLI's access token; used only when the app has no usable session. */
+  loadCliAccessToken: () => Promise<string | null>
+}
+
+/** Where the Cursor CLI keeps its login, most specific first: an explicit
+ *  override (env, then config), then the XDG location the CLI itself uses. */
+export function cursorCliAuthPaths(
+  env: NodeJS.ProcessEnv = process.env,
+  home: string = os.homedir(),
+  configured?: string | null,
+): string[] {
+  const expand = (value: string) => value.startsWith('~/') ? path.join(home, value.slice(2)) : value
+  const xdg = env['XDG_CONFIG_HOME']?.trim()
+  const candidates = [
+    env['CODEBURN_CURSOR_AUTH_FILE']?.trim(),
+    configured?.trim(),
+    path.join(xdg && path.isAbsolute(xdg) ? xdg : path.join(home, '.config'), 'cursor', 'auth.json'),
+  ].filter((value): value is string => !!value).map(expand)
+  return [...new Set(candidates)]
+}
+
+async function readCliAccessToken(file: string): Promise<string | null> {
+  if (!existsSync(file)) return null
+  const parsed = JSON.parse(await readFile(file, 'utf-8')) as { accessToken?: unknown }
+  const token = typeof parsed?.accessToken === 'string' ? parsed.accessToken.trim() : ''
+  return token.length > 0 ? token : null
+}
+
+/**
+ * Read-only lookup of the Cursor CLI's access token. Returns the first token
+ * that is a live JWT; when none is, the first one found (so the caller reports
+ * an expired session rather than a signed-out one). A malformed file is skipped.
+ */
+export async function cursorAccessTokenFromCliAuth(
+  paths: string[],
+  now: number = Date.now(),
+): Promise<string | null> {
+  let fallback: string | null = null
+  for (const file of paths) {
+    let token: string | null
+    try {
+      token = await readCliAccessToken(file)
+    } catch {
+      continue
+    }
+    if (token === null) continue
+    if (cursorSessionCookie(token, now) !== null) return token
+    fallback ??= token
+  }
+  return fallback
+}
+
+async function defaultCliAccessToken(): Promise<string | null> {
+  let configured: string | undefined
+  try {
+    const { readConfig } = await import('../config.js')
+    configured = (await readConfig()).cursorAuthFile
+  } catch {
+    configured = undefined
+  }
+  return cursorAccessTokenFromCliAuth(cursorCliAuthPaths(process.env, os.homedir(), configured))
+}
+
+export type CursorTokenSource = 'app' | 'cli'
+
+/**
+ * The app's session first (existing behaviour), then the CLI's. The CLI is
+ * consulted when the app has no token, or when its plaintext token is not a
+ * live JWT. A database error is rethrown only when the CLI has nothing either.
+ */
+export async function resolveCursorAccessToken(
+  deps: Pick<CursorDeps, 'databasePath' | 'loadAccessToken' | 'loadCliAccessToken'>,
+  now: number,
+): Promise<{ token: string; source: CursorTokenSource } | null> {
+  let appToken: string | null = null
+  let appError: unknown = null
+  try {
+    appToken = (await deps.loadAccessToken(deps.databasePath))?.trim() || null
+  } catch (error) {
+    appError = error
+  }
+  if (appToken && (isCursorSafeStorageToken(appToken) || cursorSessionCookie(appToken, now) !== null)) {
+    return { token: appToken, source: 'app' }
+  }
+  let cliToken: string | null = null
+  try {
+    cliToken = (await deps.loadCliAccessToken())?.trim() || null
+  } catch {
+    cliToken = null
+  }
+  if (cliToken && cursorSessionCookie(cliToken, now) !== null) return { token: cliToken, source: 'cli' }
+  if (appError !== null) throw appError
+  if (appToken) return { token: appToken, source: 'app' }
+  return cliToken ? { token: cliToken, source: 'cli' } : null
+}
+
+/** A caller that injects the app loader owns every credential source, so the
+ *  real CLI file is never read behind its back (tests stay hermetic). */
+export function cliLoaderFor(options: { loadAccessToken?: unknown; loadCliAccessToken?: () => Promise<string | null> }): () => Promise<string | null> {
+  return options.loadCliAccessToken ?? (options.loadAccessToken ? async () => null : defaultCliAccessToken)
 }
 
 /**
@@ -95,6 +205,7 @@ function defaultDeps(): CursorDeps {
     loadAccessToken: cursorAccessTokenFromDatabase,
     now: Date.now,
     readKeychain: (service, accounts) => readKeychainPassword(service, accounts),
+    loadCliAccessToken: defaultCliAccessToken,
   }
 }
 
@@ -271,17 +382,18 @@ export function cursorSessionCookie(token: string, now: number): string | null {
 export type CursorResult = { quota: QuotaProvider; retryAfterSeconds?: number }
 
 export async function fetchCursorQuota(options: Partial<CursorDeps> & { signal?: AbortSignal; allowKeychain?: boolean } = {}): Promise<CursorResult> {
-  const deps = { ...defaultDeps(), ...options }
-  let token: string | null
+  const deps = { ...defaultDeps(), ...options, loadCliAccessToken: cliLoaderFor(options) }
+  let resolved: { token: string; source: CursorTokenSource } | null
   try {
-    token = (await deps.loadAccessToken(deps.databasePath))?.trim() || null
+    resolved = await resolveCursorAccessToken(deps, deps.now())
   } catch (error) {
     // Cursor holding a write lock, or a database this build cannot open, is a
     // local condition that clears itself; never a signed-out user.
     console.warn(`Cursor quota unavailable: ${sanitizeError(error)}`)
     return { quota: empty('transientFailure', UNREADABLE_FOOTER) }
   }
-  if (!token) return { quota: empty('disconnected', SIGNED_OUT_FOOTER) }
+  if (!resolved) return { quota: empty('disconnected', SIGNED_OUT_FOOTER) }
+  const token = resolved.token
 
   // Keychain consent is user-initiated, as for Claude: only a caller that says so may raise the prompt.
   if (isCursorSafeStorageToken(token) && !options.allowKeychain) return { quota: empty('terminalFailure', [cursorLockedMessage()]) }
@@ -308,6 +420,7 @@ export async function fetchCursorQuota(options: Partial<CursorDeps> & { signal?:
     if (!response.ok) return { quota: empty('transientFailure', PARSE_FOOTER) }
     // Never log the body - it carries account data.
     const quota = decodeCursorUsage(await response.json())
+    if (quota && resolved.source === 'cli') return { quota: { ...quota, footerLines: CLI_SOURCE_FOOTER } }
     return { quota: quota ?? empty('transientFailure', PARSE_FOOTER) }
   } catch (error) {
     console.warn(`Cursor quota unavailable: ${sanitizeError(error)}`)
